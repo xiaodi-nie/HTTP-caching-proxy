@@ -1,0 +1,504 @@
+NOTE:(open full screen for reading this testcases files)
+This program includes 3 c++ header file and 1 main.cpp file (cache.h http_struct.h main.cpp proxy_server.h) and 1 Makefile
+*This program implements methods to handle three different http requests -- GET, POST and CONNECT
+*Build connection with browser and original server via socket.
+*Http requests could be concurrent, and will be handled by multiple threads. Each threads will only be created if we receive a request, accept function will return a new file descriptor and then create a new thread to handle that request.
+*For GET method, we implements a cache to store vaild response. If the cache-control field in request is equal to "no-store", it will not access cache and send request to original server directly. Otherwise we will store that request and related response into our cache. If the cache-control in response is equal to "no-cache", we will send conditional request to original server every time when we request that resource. If no-cache is not identified, we need to know the resource is expired or not. If the cached response is not expired, we could send that copy to browser. If the resource is expired, we need to know if this resource has field must-revalidation. If this field is raised, we need to send conditional request to server, if the resource is not modified, server will send "304 not modified" response, we could send that cached response. If the resource is no longer vaild, server will send newest response with "200 OK", we need to send this new response to browser and updata cache.
+*For expiration calculation, we will try to find max-age first, and then try to find expires. Use one of these value to know if cached resource is vaild or not.
+*For conditional request, we will add If-None-Match or If-Modified-Since field in request. 
+
+**NOTE**:(VERY important messages for TESTING)
+In order to test our functions correctly, we need to configure our browser.
+The browser used in this program is firefox.
+1). We need to set proxy configuration manually. Set HTTP proxy and SSL proxy configuration to our my vm IP address and the bind port:8080.
+2). Disable firefox cache, since we want to use our own cache, we need to disable cache function in browser.
+3). Every time when we want to know if our cache is working as our expectation, we can't press refresh button, since this will add an extra field Cache-Control: max-age=0, which is not shown in first request, thus will not occur in our cache. If we press refresh button, the request will be different, we can't find it in our cache difinitely. What we need to do is opening another tag, input that request.
+4). For cookies, It's a little bit complicated for cookies control. If we want to test our GET method and our cache, we need to disable all cookies including third party. Since the browser will add cookies field sometimes, which will cause similar problem as press refresh button. But if we want to test our POST method, we need to enable cookies if some post operation need third party cookies. For example, we use our hw1 -- Django RideService web-app to test post funtion, if we disable cookies, it will show an error -- this site requires a CSRF cookie when submitting forms.(We use crispy forms in hw1, thus we need to use cookies for sure).
+-----------------------------------------------------------------------------------------------------
+#For GET method:
+When we parse our request and it's a GET method, and the cache-contral field is not no-store, we will try to find that request and related response in cache, if the request is not cached, we will send that request to server and cached all "200 OK" response. If the request is found in cache, we will figure out whether this request-response is vaild or not. Finally, Update cache if necessary.
+
+1). Open www.example.com/. The website could be opened correctly:
+Request:
+GET http://www.example.com/ HTTP/1.1
+Host: www.example.com
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.13; rv:65.0) Gecko/20100101 Firefox/65.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate
+Connection: keep-alive
+Upgrade-Insecure-Requests: 1
+
+
+Response:
+HTTP/1.1 200 OK
+Content-Encoding: gzip
+Accept-Ranges: bytes
+Cache-Control: max-age=604800
+Content-Type: text/html; charset=UTF-8
+Date: Tue, 26 Feb 2019 01:40:39 GMT
+Etag: "1541025663"
+Expires: Tue, 05 Mar 2019 01:40:39 GMT
+Last-Modified: Fri, 09 Aug 2013 23:54:35 GMT
+Server: ECS (dcb/7ECB)
+Vary: Accept-Encoding
+X-Cache: HIT
+Content-Length: 606
+
+(content omitted)
+
+And log shows:
+4: "GET http://www.example.com/ HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 01:40:39 2019
+4: not in cache
+4: Requesting "GET http://www.example.com/ HTTP/1.1" from www.example.com
+4: Received "HTTP/1.1 200 OK" from www.example.com
+4: request-response cached successfully
+4: Cached, expires at: Tue Mar  5 05:40:39 2019
+5: "GET http://www.example.com/favicon.ico HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 01:40:39 2019
+5: not in cache
+5: Requesting "GET http://www.example.com/favicon.ico HTTP/1.1" from www.example.com
+5: Received "HTTP/1.1 404 Not Found" from www.example.com
+
+if we make same request(!!!!!open another tag!!!!!), the log shows:
+16: "GET http://www.example.com/ HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 01:49:06 2019
+16: in cache
+16: NOTE Cache-Control: max-age= 604800
+16: NOTE resource fresh, sending cached copy
+17: "GET http://www.example.com/favicon.ico HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 01:49:06 2019
+17: not in cache
+17: Requesting "GET http://www.example.com/favicon.ico HTTP/1.1" from www.example.com
+17: Received "HTTP/1.1 404 Not Found" from www.example.com
+
+Request "http://www.example.com/" is in cache, while "http://www.example.com/favicon.ico" is not in cache, since we receive "HTTP/1.1 404 Not Found" at the first time. We will never cache that response.
+For "http://www.example.com/", the Cache-Contral is max-age, it's still fresh, so we just sent that cached response.
+
+2). Open http://people.duke.edu/~bmr23/ece568/class.html, The website could be opened correctly:
+
+Request: (browser will send these three requests at same time)
+GET http://people.duke.edu/~bmr23/ece568/class.html HTTP/1.1
+Host: people.duke.edu
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.13; rv:65.0) Gecko/20100101 Firefox/65.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate
+Connection: keep-alive
+Upgrade-Insecure-Requests: 1
+
+
+
+GET http://people.duke.edu/~bmr23/style.css HTTP/1.1
+Host: people.duke.edu
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.13; rv:65.0) Gecko/20100101 Firefox/65.0
+Accept: text/css,*/*;q=0.1
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate
+Referer: http://people.duke.edu/~bmr23/ece568/class.html
+Connection: keep-alive
+
+
+
+GET http://people.duke.edu/favicon.ico HTTP/1.1
+Host: people.duke.edu
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.13; rv:65.0) Gecko/20100101 Firefox/65.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate
+Connection: keep-alive
+
+
+
+Response:
+HTTP/1.1 200 OK
+Date: Tue, 26 Feb 2019 01:53:57 GMT
+Server: Apache
+Last-Modified: Thu, 14 Feb 2019 20:11:28 GMT
+ETag: "2288c0422-163b-581e04381b6e2"
+Accept-Ranges: bytes
+Content-Length: 5691
+Connection: close
+Content-Type: text/html; charset=UTF-8
+
+(content omitted)
+
+HTTP/1.1 200 OK
+Date: Tue, 26 Feb 2019 01:53:58 GMT
+Server: Apache
+Last-Modified: Sun, 24 Aug 2014 21:32:59 GMT
+ETag: "121d834d5-1d6-50166d07258c0"
+Accept-Ranges: bytes
+Content-Length: 470
+Connection: close
+Content-Type: text/css
+
+(content omitted)
+
+And log shows:
+2: "GET http://people.duke.edu/~bmr23/ece568/class.html HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 01:53:57 2019
+2: not in cache
+2: Requesting "GET http://people.duke.edu/~bmr23/ece568/class.html HTTP/1.1" from people.duke.edu
+2: Received "HTTP/1.1 200 OK" from people.duke.edu
+2: request-response cached successfully
+3: "GET http://people.duke.edu/~bmr23/style.css HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 01:53:58 2019
+3: not in cache
+3: Requesting "GET http://people.duke.edu/~bmr23/style.css HTTP/1.1" from people.duke.edu
+3: Received "HTTP/1.1 200 OK" from people.duke.edu
+3: request-response cached successfully
+4: "GET http://people.duke.edu/favicon.ico HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 01:53:58 2019
+4: not in cache
+4: Requesting "GET http://people.duke.edu/favicon.ico HTTP/1.1" from people.duke.edu
+4: Received "HTTP/1.1 404 Not Found" from people.duke.edu
+
+if we make same request(!!!!!open another tag!!!!!), the log shows:
+
+7: "GET http://people.duke.edu/~bmr23/ece568/class.html HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:01:01 2019
+7: in cache
+8: "GET http://people.duke.edu/~bmr23/style.css HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:01:01 2019
+8: in cache
+9: "GET http://people.duke.edu/favicon.ico HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:01:01 2019
+9: not in cache
+9: Requesting "GET http://people.duke.edu/favicon.ico HTTP/1.1" from people.duke.edu
+9: Received "HTTP/1.1 404 Not Found" from people.duke.edu
+
+Request "http://people.duke.edu/~bmr23/ece568/class.html" and "http://people.duke.edu/~bmr23/style.css" is in cache, since they are "200 OK" response.
+
+3). Open http://www.cplusplus.com/. The website could be opened correctly:
+There are dozens of related requests of cplusplus website, We only show the log file here.
+
+11: "GET http://www.cplusplus.com/ HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+11: not in cache
+11: Requesting "GET http://www.cplusplus.com/ HTTP/1.1" from www.cplusplus.com
+11: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+11: request-response cached successfully
+16: "GET http://www.cplusplus.com/v321/main.js HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+16: not in cache
+16: Requesting "GET http://www.cplusplus.com/v321/main.js HTTP/1.1" from www.cplusplus.com
+12: "GET http://www.cplusplus.com/v321/main.css HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+12: not in cache
+12: Requesting "GET http://www.cplusplus.com/v321/main.css HTTP/1.1" from www.cplusplus.com
+16: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+16: request-response cached successfully
+12: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+12: request-response cached successfully
+17: "GET http://www.cplusplus.com/img/welcometo.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+17: not in cache
+17: Requesting "GET http://www.cplusplus.com/img/welcometo.gif HTTP/1.1" from www.cplusplus.com
+18: "GET http://www.googletagservices.com/tag/js/gpt.js HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+18: not in cache
+18: Requesting "GET http://www.googletagservices.com/tag/js/gpt.js HTTP/1.1" from www.googletagservices.com
+14: "GET http://www.cplusplus.com/ico/social_googleplus.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+14: not in cache
+14: Requesting "GET http://www.cplusplus.com/ico/social_googleplus.png HTTP/1.1" from www.cplusplus.com
+13: "GET http://www.cplusplus.com/ico/social_facebook.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+13: not in cache
+15: "GET http://www.cplusplus.com/ico/social_twitter.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+15: not in cache
+13: Requesting "GET http://www.cplusplus.com/ico/social_facebook.png HTTP/1.1" from www.cplusplus.com
+15: Requesting "GET http://www.cplusplus.com/ico/social_twitter.png HTTP/1.1" from www.cplusplus.com
+18: Received "HTTP/1.1 200 OK" from www.googletagservices.com
+18: request-response cached successfully
+18: Cached, expires at: Tue Feb 26 06:06:49 2019
+14: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+14: request-response cached successfully
+13: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+13: request-response cached successfully
+15: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+15: request-response cached successfully
+17: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+17: request-response cached successfully
+22: "GET http://www.cplusplus.com/v321/bgv.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+22: not in cache
+22: Requesting "GET http://www.cplusplus.com/v321/bgv.png HTTP/1.1" from www.cplusplus.com
+24: "GET http://www.cplusplus.com/img/bg_info.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+24: not in cache
+24: Requesting "GET http://www.cplusplus.com/img/bg_info.gif HTTP/1.1" from www.cplusplus.com
+23: "GET http://www.cplusplus.com/v321/bgh.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+23: not in cache
+23: Requesting "GET http://www.cplusplus.com/v321/bgh.png HTTP/1.1" from www.cplusplus.com
+21: "GET http://www.cplusplus.com/v321/bg.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+21: not in cache
+21: Requesting "GET http://www.cplusplus.com/v321/bg.png HTTP/1.1" from www.cplusplus.com
+26: "GET http://www.cplusplus.com/img/bg_art.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+26: not in cache
+26: Requesting "GET http://www.cplusplus.com/img/bg_art.gif HTTP/1.1" from www.cplusplus.com
+27: "GET http://www.cplusplus.com/img/bg_ref.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+27: not in cache
+27: Requesting "GET http://www.cplusplus.com/img/bg_ref.gif HTTP/1.1" from www.cplusplus.com
+28: "GET http://www.cplusplus.com/img/bg_doc.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+28: not in cache
+28: Requesting "GET http://www.cplusplus.com/img/bg_doc.gif HTTP/1.1" from www.cplusplus.com
+29: "GET http://www.cplusplus.com/img/bg_sch.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+29: not in cache
+29: Requesting "GET http://www.cplusplus.com/img/bg_sch.gif HTTP/1.1" from www.cplusplus.com
+25: "GET http://www.cplusplus.com/img/bg_src.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:49 2019
+25: not in cache
+25: Requesting "GET http://www.cplusplus.com/img/bg_src.gif HTTP/1.1" from www.cplusplus.com
+22: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+22: request-response cached successfully
+24: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+24: request-response cached successfully
+23: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+23: request-response cached successfully
+26: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+26: request-response cached successfully
+27: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+27: request-response cached successfully
+28: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+28: request-response cached successfully
+25: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+25: request-response cached successfully
+29: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+29: request-response cached successfully
+21: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+21: request-response cached successfully
+30: "GET http://www.cplusplus.com/favicon.ico HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:06:50 2019
+30: not in cache
+30: Requesting "GET http://www.cplusplus.com/favicon.ico HTTP/1.1" from www.cplusplus.com
+30: Received "HTTP/1.1 200 OK" from www.cplusplus.com
+30: request-response cached successfully
+
+if we make same request(!!!!!open another tag!!!!!), the log shows:
+
+35: "GET http://www.cplusplus.com/ HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:09:59 2019
+35: in cache
+37: "GET http://www.cplusplus.com/v321/main.css HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:09:59 2019
+37: in cache
+36: "GET http://www.cplusplus.com/v321/main.js HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:09:59 2019
+36: in cache
+38: "GET http://www.cplusplus.com/ico/social_googleplus.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:09:59 2019
+38: in cache
+41: "GET http://www.cplusplus.com/ico/social_twitter.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:09:59 2019
+41: in cache
+40: "GET http://www.cplusplus.com/ico/social_facebook.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:09:59 2019
+40: in cache
+39: "GET http://www.cplusplus.com/img/welcometo.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:09:59 2019
+39: in cache
+42: "GET http://www.googletagservices.com/tag/js/gpt.js HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:09:59 2019
+42: in cache
+42: NOTE Cache-Control: max-age= 900
+42: NOTE resource fresh, sending cached copy
+47: "GET http://www.cplusplus.com/v321/bgh.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+47: in cache
+45: "GET http://www.cplusplus.com/v321/bgv.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+45: in cache
+46: "GET http://www.cplusplus.com/v321/bg.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+46: in cache
+48: "GET http://www.cplusplus.com/img/bg_info.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+48: in cache
+50: "GET http://www.cplusplus.com/img/bg_ref.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+50: in cache
+49: "GET http://www.cplusplus.com/img/bg_src.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+49: in cache
+52: "GET http://www.cplusplus.com/img/bg_art.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+52: in cache
+51: "GET http://www.cplusplus.com/img/bg_doc.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+51: in cache
+53: "GET http://www.cplusplus.com/img/bg_sch.gif HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+53: in cache
+55: "GET http://www.cplusplus.com/favicon.ico HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 02:10:00 2019
+55: in cache
+
+Note that thread 42 is handling "http://www.googletagservices.com/tag/js/gpt.js", and this request has been cached successfully, with max-age=900. After 900 seconds, we get: (no must-revalidation, even this resource is expird, we still send that cached copy) 
+
+102: "GET http://www.googletagservices.com/tag/js/gpt.js HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 03:54:51 2019
+102: in cache
+102: NOTE Cache-Control: max-age= 900
+102: NOTE Cached response expires
+102: NOTE cache copied vaild, send copy
+
+4). To test our cache funtionalities, we use www.example.com again, the website can be opened correctly:
+We changed Cache-Control field of response, Cache-Control: max-age=60 must-revalidate (it should be max-age=604800), and save that response into our cache, when we request this resource again, the log shows:
+3: "GET http://www.example.com/ HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 19:41:37 2019
+3: in cache
+3: NOTE Cache-Control: max-age= 60
+3: NOTE Cached response expires
+3: NOTE Cache-Control: must-revalidation
+3: NOTE cache copied vaild, send copy
+
+when the resource is expired, it will make conditional request since we set must-revalidate flag, and server will send:
+
+HTTP/1.1 304 Not Modified
+Cache-Control: max-age=604800
+Date: Tue, 26 Feb 2019 19:41:37 GMT
+Etag: "1541025663+ident+gzip"
+Expires: Tue, 05 Mar 2019 19:41:37 GMT
+Last-Modified: Fri, 09 Aug 2013 23:54:35 GMT
+Server: ECS (dcb/7FA5)
+Vary: Accept-Encoding
+X-Cache: HIT
+
+Since we receive 304 Not Modified, we are allowed to send cached copy.
+
+We could also check functionalities of expires and no-store with similar opration.
+
+We also use http://www.artsci.utoronto.ca/futurestudents (Brian mentioned this to test max-age on piazza)
+As we can see, it will send 53 concurrent requests at sametime. The response has mex-age=0, expire time, we make this request twice, and log shows:
+
+54: "GET http://www.artsci.utoronto.ca/futurestudents HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 22:28:36 2019
+54: in cache
+54: NOTE Expires at: Sat Jan  1 04:00:00 2000
+54: NOTE no need for validation, keep sending cached copy
+55: "GET http://www.artsci.utoronto.ca/futurestudents/portal_javascripts/Plone%20Default/jquery.js HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 22:28:36 2019
+55: in cache
+55: NOTE Cache-Control: max-age= 0
+55: NOTE Cached response expires
+55: NOTE no need for validation, keep sending cached copy
+
+And we set cache size equals to 50, and there is one extra request that not in cache, So it will remove one item in cache and save itself.
+
+103: "GET http://www.artsci.utoronto.ca/futurestudents/i1.jpg HTTP/1.1" from 10.197.128.149 @ Tue Feb26 22:28:37 2019
+103: not in cache
+103: Requesting "GET http://www.artsci.utoronto.ca/futurestudents/i1.jpg HTTP/1.1" from www.artsci.utoronto.ca
+103: Received "HTTP/1.1 200 OK" from www.artsci.utoronto.ca
+(no-id): NOTE delete http://www.artsci.utoronto.ca/futurestudents/i1.jpg from cache
+103: request-response cached successfully
+
+-----------------------------------------------------------------------------------------------------
+#For POST method:
+We use our hw1 for POST testing. Setup hw1 website first.
+1). Open "http://0.0.0.0:8000/rideService/login/", the website could be opened correctly. This is a GET method with other requests for related files.
+    (request and response omitted)
+    The log shows:
+1: "GET http://0.0.0.0:8000/rideService/login/ HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:13:41 2019
+1: not in cache
+1: Requesting "GET http://0.0.0.0:8000/rideService/login/ HTTP/1.1" from 0.0.0.0
+1: Received "HTTP/1.1 200 OK" from 0.0.0.0
+1: request-response cached successfully
+1: Cached, expires at: Wed Feb 27 01:13:41 2019
+1: Cached, but requires re-validation
+3: "GET http://0.0.0.0:8000/static/css/styles.css HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:13:41 2019
+3: not in cache
+3: Requesting "GET http://0.0.0.0:8000/static/css/styles.css HTTP/1.1" from 0.0.0.0
+3: Received "HTTP/1.1 200 OK" from 0.0.0.0
+3: request-response cached successfully
+7: "GET http://0.0.0.0:8000/static/css/background.jpeg HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:13:41 2019
+7: not in cache
+7: Requesting "GET http://0.0.0.0:8000/static/css/background.jpeg HTTP/1.1" from 0.0.0.0
+8: "GET http://0.0.0.0:8000/favicon.ico HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:13:41 2019
+8: not in cache
+8: Requesting "GET http://0.0.0.0:8000/favicon.ico HTTP/1.1" from 0.0.0.0
+7: Received "HTTP/1.1 200 OK" from 0.0.0.0
+8: Received "HTTP/1.1 404 Not Found" from 0.0.0.0
+7: request-response cached successfully
+
+There is a login form on this page, input username and password, submitting to server, There will be a POST request:
+
+15: "POST http://0.0.0.0:8000/rideService/login/ HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+15: Received "HTTP/1.1 302 Found" from 0.0.0.0
+
+The response is a 302 Found messages:
+
+HTTP/1.1 302 Found
+Server: nginx/1.15.8
+Date: Tue, 26 Feb 2019 20:19:48 GMT
+Content-Type: text/html; charset=utf-8
+Content-Length: 0
+Connection: keep-alive
+Location: /rideService/role/
+Expires: Tue, 26 Feb 2019 20:19:48 GMT
+Cache-Control: max-age=0, no-cache, no-store, must-revalidate
+Vary: Cookie
+X-Frame-Options: SAMEORIGIN
+Set-Cookie: csrftoken=X9o4nTVYVWvwAVGsJtEpqka0gblrnYDhlvd46OI0T1pKs1rQ1M9gddbnYVBToU7Z; expires=Tue, 25 Feb 2020 20:19:48 GMT; Max-Age=31449600; Path=/; SameSite=Lax
+Set-Cookie: sessionid=9nugrh9xveaubqnj9xds96kphkyuntyd; expires=Tue, 12 Mar 2019 20:19:48 GMT; HttpOnly; Max-Age=1209600; Path=/; SameSite=Lax
+
+browser will handle this redirect opration, and make other requests for related files.
+
+16: "GET http://0.0.0.0:8000/rideService/role/ HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+16: not in cache
+16: Requesting "GET http://0.0.0.0:8000/rideService/role/ HTTP/1.1" from 0.0.0.0
+16: Received "HTTP/1.1 200 OK" from 0.0.0.0
+16: request-response cached successfully
+17: "GET http://0.0.0.0:8000/static/css/styles.css HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+17: not in cache
+17: Requesting "GET http://0.0.0.0:8000/static/css/styles.css HTTP/1.1" from 0.0.0.0
+17: Received "HTTP/1.1 200 OK" from 0.0.0.0
+17: request-response cached successfully
+21: "GET http://0.0.0.0:8000/static/css/driver.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+21: not in cache
+21: Requesting "GET http://0.0.0.0:8000/static/css/driver.png HTTP/1.1" from 0.0.0.0
+19: "GET http://0.0.0.0:8000/static/css/sharer.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+19: not in cache
+19: Requesting "GET http://0.0.0.0:8000/static/css/sharer.png HTTP/1.1" from 0.0.0.0
+20: "GET http://0.0.0.0:8000/static/css/owner.png HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+20: not in cache
+20: Requesting "GET http://0.0.0.0:8000/static/css/owner.png HTTP/1.1" from 0.0.0.0
+21: Received "HTTP/1.1 200 OK" from 0.0.0.0
+21: request-response cached successfully
+25: "GET http://0.0.0.0:8000/static/css/background.jpeg HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+25: not in cache
+25: Requesting "GET http://0.0.0.0:8000/static/css/background.jpeg HTTP/1.1" from 0.0.0.0
+20: Received "HTTP/1.1 200 OK" from 0.0.0.0
+20: request-response cached successfully
+19: Received "HTTP/1.1 200 OK" from 0.0.0.0
+19: request-response cached successfully
+25: Received "HTTP/1.1 200 OK" from 0.0.0.0
+26: "GET http://0.0.0.0:8000/favicon.ico HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+26: not in cache
+26: Requesting "GET http://0.0.0.0:8000/favicon.ico HTTP/1.1" from 0.0.0.0
+26: Received "HTTP/1.1 404 Not Found" from 0.0.0.0
+25: request-response cached successfully
+22: "CONNECT code.jquery.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+24: "CONNECT maxcdn.bootstrapcdn.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+18: "CONNECT stackpath.bootstrapcdn.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+10: "CONNECT getpocket.cdn.mozilla.net:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:18:12 2019
+12: "CONNECT img-getpocket.cdn.mozilla.net:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:18:12 2019
+14: "CONNECT safebrowsing.googleapis.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:18:12 2019
+23: "CONNECT cdnjs.cloudflare.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 20:19:48 2019
+
+-----------------------------------------------------------------------------------------------------
+#For CONNECT:
+Connect is simple, when we receive a connect request, we will build a tunnel between browser and server, and if on one send data through that tunnel, the tunnel will break, thread return and stop.
+
+We use google and Wikimedia to test our CONNECT methods, log shows:
+
+1: "CONNECT www.google.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:37:42 2019
+1: Tunnel closed
+2: "CONNECT www.google.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:37:42 2019
+2: Tunnel closed
+16: "CONNECT upload.wikimedia.org:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:42 2019
+16: Tunnel closed
+18: "CONNECT upload.wikimedia.org:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:42 2019
+18: Tunnel closed
+20: "CONNECT upload.wikimedia.org:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:42 2019
+20: Tunnel closed
+19: "CONNECT upload.wikimedia.org:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:42 2019
+19: Tunnel closed
+17: "CONNECT upload.wikimedia.org:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:42 2019
+17: Tunnel closed
+12: "CONNECT tiles.services.mozilla.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:17 2019
+12: Tunnel closed
+11: "CONNECT tiles.services.mozilla.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:17 2019
+11: Tunnel closed
+8: "CONNECT googleads.g.doubleclick.net:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:37:46 2019
+8: Tunnel closed
+9: "CONNECT id.google.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:38:07 2019
+9: Tunnel closed
+4: "CONNECT ssl.gstatic.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:37:45 2019
+4: Tunnel closed
+10: "CONNECT getpocket.cdn.mozilla.net:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:16 2019
+10: Tunnel closed
+13: "CONNECT img-getpocket.cdn.mozilla.net:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:17 2019
+13: Tunnel closed
+21: "CONNECT login.wikimedia.org:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:43 2019
+21: Tunnel closed
+15: "CONNECT upload.wikimedia.org:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:42 2019
+15: Tunnel closed
+22: "CONNECT meta.wikimedia.org:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:40:07 2019
+22: Tunnel closed
+14: "CONNECT en.wikipedia.org:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:39:42 2019
+14: Tunnel closed
+6: "CONNECT apis.google.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:37:45 2019
+6: Tunnel closed
+7: "CONNECT adservice.google.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:37:45 2019
+7: Tunnel closed
+5: "CONNECT www.gstatic.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:37:45 2019
+5: Tunnel closed
+3: "CONNECT www.google.com:443 HTTP/1.1" from 10.197.128.149 @ Tue Feb 26 21:37:45 2019
+3: Tunnel closed
+-----------------------------------------------------------------------------------------------------
+#Extra Error Handling:
+
+We observe that our proxy will somehow send a nonsense request to itself(after receiving a wired request from some strange IP(from Russia, Brazil, Georgia...)), Since our proxy is not server, it will fall in a loop, keeping request itself until program give an error: accept too many files.
+What we do here is send a "400 bad request" message to that request whose host IP is same as our VM machine, thus shun down the loop.
+
+We will also send "502 bad gateway" message to the request whose response is corrupted. For example, missing "\r\n\r\n" in message body. 
