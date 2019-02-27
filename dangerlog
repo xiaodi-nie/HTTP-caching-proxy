@@ -1,0 +1,30 @@
+1. Problems we encounted along the way:
+
+2/15: Only partial website was displayed
+This is due to our code not breaking out of the receive loop according to return value of recv and the loop was exited early.
+
+2/20: Cannot receive CONNECT request
+We realized that the browser SSL proxy setting needed to be set to our proxy's ip and port for us to 
+
+2/22: Received a single strange GET request from a weird ip, resulting in tons of GET request to host computer's ip and eventually cause the accept() method to throw "too many open files" error
+According to the professor, this behavior might be caused by:
+	  1) our proxy sees a strange GET for a resource on our own VM
+	  2) our proxy makes a connection (back to itself) and forwards the GET
+	  3) This GET just gets received back by our proxy which continues looping back from (2)
+We still don't know where that first GET came from, but we handled this error by responding with a 400 bad request response to stop all following same GET request.
+
+2/23: Requesting same website on browser, but cache showed not in cache
+This problem is caused by not blocking all cookies on the browser setting, and second request of the same website(some of them) will include cookie header
+
+2/25: Hitting refresh button on the browser, but cache showed not in cache
+We realized that hitting the refresh button will cause browser to send request with "If-Modified-Since" and "If-None-Match" header fields(conditional request), it will not match any first-time request in the cache(unconditional request). So testing cache can only be done through opening a new tab and enter the same URL again
+
+2. Failures handled in the code
+1)Whenever a system call goes wrong(bind, listen, send, recv, accept, connect,etc), already opened socket file descriptors will be closed properly before exiting the current thread
+2)If malformed request or response is received(no "\r\n\r\n", no Host header field etc), a 400 bad request and/or a 502 bad gateway will be send back to the browser respectively
+
+3. Exception guarantee
+Basic guarantee
+
+4. Flaw
+1) We only use several mutex locks to protect the cache from concurrent operations, so in some situations the proxy will be slow
